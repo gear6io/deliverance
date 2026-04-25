@@ -17,6 +17,7 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 
+use crate::components::Component;
 use crate::error::{IngestionError, Result};
 use crate::receiver::{Receiver, ReceiverHost};
 use crate::types::{Event, Source};
@@ -29,14 +30,24 @@ pub struct HttpReceiver {
     server_handle: Option<JoinHandle<()>>,
 }
 
-impl HttpReceiver {
-    pub fn from_config(raw: &serde_yaml::Value) -> anyhow::Result<Box<dyn Receiver>> {
+impl Component for HttpReceiver {
+    fn name() -> &'static str {
+        "httpreceiver"
+    }
+
+    fn from_yaml(raw: &serde_yaml::Value) -> anyhow::Result<Self> {
         let cfg: HttpReceiverConfig = serde_yaml::from_value(raw.clone())?;
-        Ok(Box::new(HttpReceiver {
+        Ok(HttpReceiver {
             config: cfg,
             shutdown_tx: None,
             server_handle: None,
-        }))
+        })
+    }
+}
+
+impl HttpReceiver {
+    pub fn from_config(raw: &serde_yaml::Value) -> anyhow::Result<Box<dyn Receiver>> {
+        Ok(Box::new(Self::from_yaml(raw)?))
     }
 }
 

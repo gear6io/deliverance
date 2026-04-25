@@ -1,5 +1,4 @@
 use std::env;
-
 use ingestion::{ComponentRegistry, Config, Engine};
 
 #[tokio::main]
