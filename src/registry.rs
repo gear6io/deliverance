@@ -1,33 +1,23 @@
 use std::collections::HashMap;
 
+use crate::components::{ComponentID, Settings};
 use crate::config::{Config, ExporterEntry, PipelineConfig};
 use crate::error::{IngestionError, Result};
-use crate::exporter::Exporter;
+use crate::exporter::{Exporter, ExporterFactory};
 use crate::pipeline::{ExporterGroup, Pipeline, DEFAULT_CHANNEL_CAPACITY};
-use crate::processor::Processor;
-use crate::receiver::Receiver;
+use crate::processor::{Processor, ProcessorFactory};
+use crate::receiver::{Receiver, ReceiverFactory};
 
-/// Factory function type for Receivers. Receives the raw component YAML config value.
-pub type ReceiverFactory =
-    Box<dyn Fn(&serde_yaml::Value) -> anyhow::Result<Box<dyn Receiver>> + Send + Sync>;
-
-/// Factory function type for Processors.
-pub type ProcessorFactory =
-    Box<dyn Fn(&serde_yaml::Value) -> anyhow::Result<Box<dyn Processor>> + Send + Sync>;
-
-/// Factory function type for Exporters.
-pub type ExporterFactory =
-    Box<dyn Fn(&serde_yaml::Value) -> anyhow::Result<Box<dyn Exporter>> + Send + Sync>;
-
-/// Static component registry. Components are registered at startup (compile-time imports);
-/// the Engine uses the registry to construct pipelines from YAML config at runtime.
+/// Static component registry. Factories are registered at startup (compile-time imports);
+/// the Engine uses the registry to construct pipeline instances from YAML config at runtime.
 ///
-/// This is the answer to PRD Q2: static compilation, not runtime plugin loading.
-/// The enterprise layer imports OSS + private packages and registers all components in main().
+/// Component IDs follow the OTel `{type}/{name}` convention — the type selects the factory,
+/// the name disambiguates multiple instances of the same type within a config file.
+/// A bare `{type}` with no name is valid and treated as a single unnamed instance.
 pub struct ComponentRegistry {
-    receivers: HashMap<String, ReceiverFactory>,
-    processors: HashMap<String, ProcessorFactory>,
-    exporters: HashMap<String, ExporterFactory>,
+    receivers: HashMap<String, Box<dyn ReceiverFactory>>,
+    processors: HashMap<String, Box<dyn ProcessorFactory>>,
+    exporters: HashMap<String, Box<dyn ExporterFactory>>,
 }
 
 impl ComponentRegistry {
@@ -39,22 +29,25 @@ impl ComponentRegistry {
         }
     }
 
-    /// Register a Receiver factory under `name` (must match the YAML receivers map key).
-    pub fn register_receiver(&mut self, name: impl Into<String>, factory: ReceiverFactory) {
-        self.receivers.insert(name.into(), factory);
+    /// Register a receiver factory. Keyed by `factory.component_type()`.
+    pub fn register_receiver(&mut self, factory: Box<dyn ReceiverFactory>) {
+        self.receivers
+            .insert(factory.component_type().to_string(), factory);
     }
 
-    /// Register a Processor factory under `name`.
-    pub fn register_processor(&mut self, name: impl Into<String>, factory: ProcessorFactory) {
-        self.processors.insert(name.into(), factory);
+    /// Register a processor factory. Keyed by `factory.component_type()`.
+    pub fn register_processor(&mut self, factory: Box<dyn ProcessorFactory>) {
+        self.processors
+            .insert(factory.component_type().to_string(), factory);
     }
 
-    /// Register an Exporter factory under `name`.
-    pub fn register_exporter(&mut self, name: impl Into<String>, factory: ExporterFactory) {
-        self.exporters.insert(name.into(), factory);
+    /// Register an exporter factory. Keyed by `factory.component_type()`.
+    pub fn register_exporter(&mut self, factory: Box<dyn ExporterFactory>) {
+        self.exporters
+            .insert(factory.component_type().to_string(), factory);
     }
 
-    /// Construct all pipelines from the config, resolving component names via registered factories.
+    /// Construct all pipelines from the config, resolving component IDs via registered factories.
     pub fn build_all(&self, config: &Config) -> Result<Vec<Pipeline>> {
         config
             .pipelines
@@ -90,34 +83,52 @@ impl ComponentRegistry {
         })
     }
 
-    fn build_receiver(&self, name: &str, config: &Config) -> Result<Box<dyn Receiver>> {
-        let factory = self.receivers.get(name).ok_or_else(|| {
-            IngestionError::Config(format!("no receiver registered for '{name}'"))
+    fn build_receiver(&self, id_str: &str, config: &Config) -> Result<Box<dyn Receiver>> {
+        let id = parse_id(id_str)?;
+        let factory = self.receivers.get(id.type_str()).ok_or_else(|| {
+            IngestionError::Config(format!(
+                "no receiver factory registered for type '{}' (from id '{id_str}')",
+                id.type_str()
+            ))
         })?;
-        let raw = config.receivers.get(name).ok_or_else(|| {
-            IngestionError::Config(format!("receiver '{name}' missing from config"))
+        let raw = config.receivers.get(id_str).ok_or_else(|| {
+            IngestionError::Config(format!("receiver '{id_str}' missing from config"))
         })?;
-        factory(raw).map_err(IngestionError::Component)
+        factory
+            .create(&Settings::new(id), raw)
+            .map_err(IngestionError::Component)
     }
 
-    fn build_processor(&self, name: &str, config: &Config) -> Result<Box<dyn Processor>> {
-        let factory = self.processors.get(name).ok_or_else(|| {
-            IngestionError::Config(format!("no processor registered for '{name}'"))
+    fn build_processor(&self, id_str: &str, config: &Config) -> Result<Box<dyn Processor>> {
+        let id = parse_id(id_str)?;
+        let factory = self.processors.get(id.type_str()).ok_or_else(|| {
+            IngestionError::Config(format!(
+                "no processor factory registered for type '{}' (from id '{id_str}')",
+                id.type_str()
+            ))
         })?;
-        let raw = config.processors.get(name).ok_or_else(|| {
-            IngestionError::Config(format!("processor '{name}' missing from config"))
+        let raw = config.processors.get(id_str).ok_or_else(|| {
+            IngestionError::Config(format!("processor '{id_str}' missing from config"))
         })?;
-        factory(raw).map_err(IngestionError::Component)
+        factory
+            .create(&Settings::new(id), raw)
+            .map_err(IngestionError::Component)
     }
 
-    fn build_exporter(&self, name: &str, config: &Config) -> Result<Box<dyn Exporter>> {
-        let factory = self.exporters.get(name).ok_or_else(|| {
-            IngestionError::Config(format!("no exporter registered for '{name}'"))
+    fn build_exporter(&self, id_str: &str, config: &Config) -> Result<Box<dyn Exporter>> {
+        let id = parse_id(id_str)?;
+        let factory = self.exporters.get(id.type_str()).ok_or_else(|| {
+            IngestionError::Config(format!(
+                "no exporter factory registered for type '{}' (from id '{id_str}')",
+                id.type_str()
+            ))
         })?;
-        let raw = config.exporters.get(name).ok_or_else(|| {
-            IngestionError::Config(format!("exporter '{name}' missing from config"))
+        let raw = config.exporters.get(id_str).ok_or_else(|| {
+            IngestionError::Config(format!("exporter '{id_str}' missing from config"))
         })?;
-        factory(raw).map_err(IngestionError::Component)
+        factory
+            .create(&Settings::new(id), raw)
+            .map_err(IngestionError::Component)
     }
 
     fn build_exporter_group(
@@ -144,4 +155,9 @@ impl Default for ComponentRegistry {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn parse_id(s: &str) -> Result<ComponentID> {
+    s.parse()
+        .map_err(|e: anyhow::Error| IngestionError::Config(e.to_string()))
 }

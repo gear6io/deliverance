@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::components::Settings;
 use crate::error::Result;
 use crate::types::Event;
 
@@ -25,4 +26,20 @@ pub trait ReceiverHost: Send + Sync {
 pub trait Receiver: Send + Sync {
     async fn start(&mut self, host: Arc<dyn ReceiverHost>) -> Result<()>;
     async fn shutdown(&mut self) -> Result<()>;
+}
+
+/// Factory for creating [`Receiver`] instances. Register one factory per component type;
+/// the registry instantiates a fresh receiver for every component ID in the config.
+///
+/// Mirrors OTel's `receiver.Factory`. `create_default_config` returns the serialized
+/// default config (useful for documentation and tooling); `create` handles deserialization
+/// and construction.
+pub trait ReceiverFactory: Send + Sync {
+    fn component_type(&self) -> &'static str;
+    fn create_default_config(&self) -> serde_yaml::Value;
+    fn create(
+        &self,
+        settings: &Settings,
+        config: &serde_yaml::Value,
+    ) -> anyhow::Result<Box<dyn Receiver>>;
 }

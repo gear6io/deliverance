@@ -17,9 +17,9 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 
-use crate::components::Component;
+use crate::components::{Component, Settings};
 use crate::error::{IngestionError, Result};
-use crate::receiver::{Receiver, ReceiverHost};
+use crate::receiver::{Receiver, ReceiverFactory, ReceiverHost};
 use crate::types::{Event, Source};
 
 pub use config::HttpReceiverConfig;
@@ -31,13 +31,15 @@ pub struct HttpReceiver {
 }
 
 impl Component for HttpReceiver {
-    fn name() -> &'static str {
+    fn component_type() -> &'static str {
         "httpreceiver"
     }
+}
 
-    fn from_yaml(raw: &serde_yaml::Value) -> anyhow::Result<Self> {
-        let cfg: HttpReceiverConfig = serde_yaml::from_value(raw.clone())?;
-        Ok(HttpReceiver {
+impl HttpReceiver {
+    fn from_yaml(config: &serde_yaml::Value) -> anyhow::Result<Self> {
+        let cfg: HttpReceiverConfig = serde_yaml::from_value(config.clone())?;
+        Ok(Self {
             config: cfg,
             shutdown_tx: None,
             server_handle: None,
@@ -45,9 +47,25 @@ impl Component for HttpReceiver {
     }
 }
 
-impl HttpReceiver {
-    pub fn from_config(raw: &serde_yaml::Value) -> anyhow::Result<Box<dyn Receiver>> {
-        Ok(Box::new(Self::from_yaml(raw)?))
+/// Registered once; creates a fresh [`HttpReceiver`] per config entry.
+pub struct HttpReceiverFactory;
+
+impl ReceiverFactory for HttpReceiverFactory {
+    fn component_type(&self) -> &'static str {
+        HttpReceiver::component_type()
+    }
+
+    fn create_default_config(&self) -> serde_yaml::Value {
+        serde_yaml::to_value(HttpReceiverConfig::default())
+            .expect("HttpReceiverConfig serializes cleanly")
+    }
+
+    fn create(
+        &self,
+        _settings: &Settings,
+        config: &serde_yaml::Value,
+    ) -> anyhow::Result<Box<dyn Receiver>> {
+        HttpReceiver::from_yaml(config).map(|r| Box::new(r) as Box<dyn Receiver>)
     }
 }
 
@@ -96,40 +114,36 @@ impl Receiver for HttpReceiver {
 
 // ── Handler ───────────────────────────────────────────────────────────────────
 
+#[derive(serde::Deserialize)]
+struct IngestRequest {
+    datasource_id: String,
+    rows: Vec<serde_json::Map<String, serde_json::Value>>,
+}
+
 async fn handle_ingest(
     State(host): State<Arc<dyn ReceiverHost>>,
     body: Bytes,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let payload: serde_json::Value = match serde_json::from_slice(&body) {
+    let payload: IngestRequest = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => return err(StatusCode::BAD_REQUEST, &e.to_string()),
     };
 
-    let datasource_id = match payload.get("datasource_id").and_then(|v| v.as_str()) {
-        Some(s) => s.to_string(),
-        None => return err(StatusCode::BAD_REQUEST, "missing datasource_id"),
-    };
+    if payload.rows.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "rows must be non-empty");
+    }
 
-    let raw_rows = match payload.get("rows").and_then(|v| v.as_array()) {
-        Some(r) if !r.is_empty() => r,
-        Some(_) => return err(StatusCode::BAD_REQUEST, "rows must be non-empty"),
-        None => return err(StatusCode::BAD_REQUEST, "missing or invalid rows"),
-    };
+    let row_refs: Vec<&serde_json::Map<String, serde_json::Value>> =
+        payload.rows.iter().collect();
 
-    let row_maps: Vec<&serde_json::Map<String, serde_json::Value>> =
-        match raw_rows.iter().map(|v| v.as_object().ok_or(())).collect() {
-            Ok(maps) => maps,
-            Err(_) => return err(StatusCode::BAD_REQUEST, "each row must be a JSON object"),
-        };
-
-    let record_batch = match build_record_batch(&row_maps) {
+    let record_batch = match build_record_batch(&row_refs) {
         Ok(rb) => rb,
         Err(e) => return err(StatusCode::BAD_REQUEST, &e.to_string()),
     };
 
     let event = Event {
         source: Source {
-            id: datasource_id,
+            id: payload.datasource_id,
             attributes: HashMap::new(),
         },
         record: Arc::new(record_batch),
