@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package common.v1;
+
+import "common/v1/event.proto";
+
+option go_package = "github.com/ingestion/pcommon/common/v1;commonv1";
+
+// Batch is the unit passed to every Exporter on each flush.
+// Multiple events from the same Source are not merged; they appear as separate entries.
+message Batch {
+  repeated Event events = 1;
+}

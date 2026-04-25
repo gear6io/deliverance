@@ -1,0 +1,377 @@
+# Ingestion Engine — PRD
+
+## Overview
+
+A high-throughput event ingestion engine inspired by the OpenTelemetry Collector model.
+Built around a declarative pipeline of **Receivers → Processors → Exporters**, configured via YAML.
+Each component is independently pluggable and owns its own validation logic. The core engine is
+Apache 2.0; an enterprise layer builds on top of it as a library without forking.
+
+Horizontally scalable, operationally stateless, cost-effective, no sidecar storage dependencies.
+
+---
+
+## Problem Statement
+
+> What pain does this solve? Who is the customer? Why now?
+
+---
+
+## Goals
+
+- Accept events at high throughput with synchronous proof-of-acceptance to the client
+- Batch writes to minimize write amplification at the destination
+- No owned SQL storage — ClickHouse is the sole source of truth for events and metadata
+- OTel-inspired pipeline model: composable Receivers, Processors, and Exporters wired via YAML
+- OSS-first: core engine is Apache 2.0; anyone can build and publish custom pipeline components
+- Pluggable durability: OSS default is at-most-once; Kafka Receiver unlocks at-least-once
+- Clean embedding API so the enterprise layer can use the OSS core as a Rust crate
+- Protobuf-defined types as the language-agnostic API contract for all pipeline data models
+
+## Non-Goals
+
+- Exactly-once delivery
+- Fleet-level batch coordination across instances (each instance flushes independently)
+- Push-based metadata cache invalidation (TTL-refresh only; keep the framework light)
+- Bundling Kafka Receiver in the default OSS auto-deploy
+- Framework-level validation primitives (each component owns its own validation logic)
+- Processor ordering enforcement (convention: `memory` before `batch`; operator's responsibility)
+
+---
+
+## Background
+
+> Any prior art, previous systems, or context the reader needs.
+
+---
+
+## Language Decision
+
+**Rust** is the implementation language. OTel is the architectural inspiration, not a compatibility
+target — we do not need to conform to OTel data models or SDKs.
+
+| Factor | Go | Rust |
+|---|---|---|
+| Memory duplication | Silent; accidental copies across goroutine boundaries are invisible | Explicit; `clone()` is always intentional — ownership enforces zero-copy |
+| GC pauses | Real at high allocation rate; mitigable but not eliminable | None; deterministic latency |
+| Arrow support | `apache/arrow-go` — production quality | `arrow-rs` — reference implementation, fastest |
+| Pipeline concurrency | Goroutines + channels | `tokio` + `mpsc` — functionally equivalent, more explicit |
+| ClickHouse driver | `clickhouse-go` — battle-tested, native TCP, columnar insert | Gap: official driver HTTP-only, no Arrow insert; will require custom exporter work |
+| Extension interface design | Go interfaces — simple | Traits + `async_trait` — more powerful, steeper learning curve |
+
+**Why Rust wins here:** The pipeline is designed to be zero-copy end-to-end — Arrow records flow
+from Receiver through channel through Batching Processor to Exporter without copying the underlying
+buffer. Go cannot enforce this at compile time; any function call can silently copy an
+`arrow.Record`. Rust's ownership model makes accidental duplication a compile error. For a system
+where memory efficiency is a core design constraint (the Memory Processor exists specifically to
+prevent OOM), enforcing zero-copy at the type system level is the right tradeoff.
+
+**The ClickHouse exporter gap is the main cost.** The official `clickhouse-rs` driver is HTTP-only
+and has no Arrow insert support (Issue #63, open). This means the ClickHouse Exporter requires
+one of:
+- Building on `clickhouse-arrow` (unofficial, community-maintained, native TCP + Arrow)
+- Contributing Arrow insert support upstream to `clickhouse-rs`
+- Implementing native protocol serialization directly on top of `clickhouse-rs`
+
+This is real work, but it is bounded and owned — unlike GC non-determinism which cannot be
+engineered away in Go without a rewrite.
+
+---
+
+## Functional Requirements
+
+| # | Requirement |
+|---|---|
+| F1 | Receiver handles its own input format and validation; emits Arrow record batches to the pipeline |
+| F2 | Receiver pushes Arrow records onto a shared channel; blocks when channel is full |
+| F3 | Memory Processor monitors system memory; blocks pipeline reads when ceiling is reached to prevent OOM |
+| F4 | Batching Processor accumulates records up to a row count or time limit, then flushes as a Batch |
+| F5 | Batching Processor does not merge or transform records; accumulation only |
+| F6 | On flush, the Executor fans each Batch out to all configured Exporters |
+| F7 | Exporters are classified as mandatory or optional per pipeline |
+| F8 | Mandatory exporters support an ordered `oneOf` fallback list; Executor tries each in order per Batch |
+| F9 | On each new Batch, Executor always retries from the primary exporter (no sticky failover state) |
+| F10 | If all `oneOf` exporters fail, Executor retries with configurable backoff; drops Batch after max retries |
+| F11 | Optional exporter failures are logged at debug level and do not affect the pipeline |
+| F12 | Metadata (datasource registry, ingestion-keys) lives in a dedicated ClickHouse database; served via in-process TTL cache |
+| F13 | Pipelines are defined declaratively in YAML; one receiver per pipeline; exporters may be shared across pipelines |
+| F14 | Internal type system is fixed: String, Bytes, Int, Float, Boolean, Array, Map |
+| F15 | Arrow record batch is the internal transport; Exporters own conversion to their destination format |
+| F16 | Exporter receives a mixed Batch (all sources), mirroring the OTel Resource → Source model |
+| F17 | Engine owns component lifecycle: starts Exporters → Processors → Receivers; shuts down in reverse |
+
+## Non-Functional Requirements
+
+| # | Requirement | Target |
+|---|---|---|
+| NF1 | Ingestion API p99 latency | TBD |
+| NF2 | Sustained event throughput per instance | TBD |
+| NF3 | Delivery guarantee (OSS default) | At-most-once |
+| NF4 | Memory Processor ceiling (bytes, via system memory measurement) | TBD |
+| NF5 | Metadata cache TTL | TBD |
+| NF6 | Executor retry: max attempts, initial backoff, max backoff | TBD |
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────── Pipeline ────────────────────────────────────────────┐
+│                                                                                      │
+│  Client ──► [ Receiver ]                                                             │
+│               owns input format + validation                                         │
+│               emits Arrow record to channel; ack after channel send                 │
+│                   │                                                                  │
+│                   ▼                                                                  │
+│          [ channel ]  ←── backpressure boundary                                      │
+│                   │                                                                  │
+│                   ▼                                                                  │
+│    [ Memory Processor ]  ←── OOM guard; blocks channel reads when ceiling hit       │
+│                   │                                                                  │
+│                   ▼                                                                  │
+│    [ Batching Processor ]                                                            │
+│      accumulates records (no merging, no transformation)                             │
+│      flushes on: timer tick | row count reached                                      │
+│                   │                                                                  │
+│                   ▼                                                                  │
+│    [ Executor — oneOf + fan-out ]                                                    │
+│      exporters: [[clickhouse/events, s3/events], clickhouse/metadata]                │
+│      │                                                                               │
+│      ├── oneOf [mandatory]: clickhouse/events → s3/events on failure                │
+│      └── fan-out [mandatory]: clickhouse/metadata                                   │
+│                                                                                      │
+│      on total failure: retry with backoff → drop after max retries                  │
+│                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Engine Lifecycle
+
+```
+Startup:   Exporters.Start → Processors.Start → Receivers.Start
+           (pipeline is ready to accept only after all downstream components are up)
+
+Shutdown:  Receivers.Shutdown → drain channel → Processors.Shutdown → Exporters.Shutdown
+           (stop accepting first; flush in-flight events before closing destinations)
+```
+
+The Engine orchestrates this sequence across all pipelines. Components implement `Start` and
+`Shutdown`; the Engine calls them in the correct order.
+
+### Reference Pattern: Resilient Deployment
+
+```
+Pipeline A:  HTTP Receiver → [memory, batch] → oneOf(ClickHouse Exporter, S3 Exporter)
+Pipeline B:  S3 Receiver   → [batch]         → ClickHouse Exporter
+```
+
+Pipeline B always runs. When ClickHouse is healthy, Pipeline A writes directly; Pipeline B
+finds no new S3 objects. When ClickHouse fails, Pipeline A falls back to S3; Pipeline B
+drains it back. Deduplication is the operator's concern (e.g. ClickHouse `ReplacingMergeTree`).
+
+### YAML Config Shape
+
+```yaml
+receivers:
+  http:
+    endpoint: 0.0.0.0:4318
+  s3:
+    bucket: events-failover
+    poll_interval: 30s
+
+processors:
+  memory:
+    limit_mib: 512
+  batch:
+    batch_size: 1000
+    flush_interval: 500ms
+
+exporters:
+  clickhouse/events:
+    dsn: clickhouse://...
+    retry:
+      max_attempts: 3
+      initial_backoff: 100ms
+      max_backoff: 10s
+  s3/events:
+    bucket: events-failover
+  clickhouse/metadata:
+    dsn: clickhouse://...
+
+pipelines:
+  events/primary:
+    receivers: [http]
+    processors: [memory, batch]
+    exporters: [[clickhouse/events, s3/events], clickhouse/metadata]
+
+  events/replay:
+    receivers: [s3]
+    processors: [batch]
+    exporters: [clickhouse/events]
+```
+
+### Components
+
+**Receivers**
+Own their input format and validation entirely. Parse JSON, Avro, Protobuf, etc. Validate
+inline and reject before emitting. Emit Arrow records to the channel; block on send under
+backpressure. One receiver per pipeline. Variants are distinct types, not config flags.
+
+Built-in (OSS): `http`, `schemahttp`, `s3` | Not bundled: `kafka`
+
+**Memory Processor**
+OOM circuit breaker. Mirrors OTel's `memorylimiter`. Monitors process memory; blocks the pipeline
+(stops reading from channel) when the configured byte ceiling is hit. No buffering, no transformation.
+Convention: always first in the processor chain.
+
+**Batching Processor**
+Accumulates Arrow records from the channel up to a configured row count or time limit, then flushes.
+No merging, no transformation — pure accumulation. Mirrors OTel's `batchprocessor`.
+
+**Executor**
+Owns fan-out and `oneOf` logic per flush:
+1. Walks the exporter list left to right.
+2. Nested array (`oneOf`): tries each in order; first success wins.
+3. Flat entry: sends to that exporter unconditionally.
+4. If all `oneOf` entries fail: retry the full Batch with backoff; drop after max retries (logged at error).
+5. Next Batch always starts from the head — no sticky failover state.
+
+**Exporters**
+Stateless. Own their validation and conversion logic. Receive a mixed Batch; convert Arrow to
+destination format internally. `oneOf` logic belongs to the Executor; exporters just export.
+
+Built-in (OSS): `clickhouse`, `s3`, `file` | Not bundled: `kafka`
+
+**Metadata Store**
+Dedicated ClickHouse database. Holds datasource registry and ingestion-keys. Served in-process
+via a TTL-refreshed cache. First-seen datasources trigger a live fetch. Components access the
+cache directly — it is not a pipeline stage.
+
+**Enterprise Layer**
+Private repo. Imports OSS engine as a Go library. Adds receivers, processors, exporters,
+and managed tooling. Does not fork the core.
+
+### Internal Type System
+
+| Type | Notes |
+|---|---|
+| String | UTF-8 |
+| Bytes | Raw binary |
+| Int | 64-bit signed |
+| Float | 64-bit |
+| Boolean | |
+| Array | Homogeneous; element type from this table |
+| Map | String keys; values from this table |
+
+Receivers normalize inbound data to these types when building Arrow records.
+Arrow schemas are constrained to this type system. Exporters convert to destination-native types.
+
+### Batch Data Model
+
+Mirrors OTel's `ResourceLogs` model. Source = Resource. Records are not merged per source;
+a Batch may contain multiple entries for the same Source from separate receiver emits.
+
+```go
+type Source struct {
+    ID         string
+    Attributes map[string]any
+}
+
+type Event struct {
+    Source Source
+    Record arrow.Record
+}
+
+type Batch []Event
+```
+
+### Durability Tiers
+
+| Tier | Setup | Guarantee | OSS |
+|---|---|---|---|
+| Basic | `http → clickhouse` | At-most-once | Yes |
+| Resilient | `http → oneOf(clickhouse, s3)` + `s3 → clickhouse` (reference pattern) | At-most-once + replay | Yes |
+| Durable | `kafka → clickhouse` | At-least-once | No |
+
+---
+
+## Open Questions
+
+### Q1: Rust Trait Contracts
+
+The three extension surfaces need concrete Rust traits before anyone can build a custom component.
+Draft below — validate or correct:
+
+```rust
+// Receiver: framework calls start(); receiver calls host.emit() to push into the pipeline.
+// emit() is async and awaits when the channel is full (backpressure via tokio mpsc).
+#[async_trait]
+pub trait Receiver: Send + Sync {
+    async fn start(&mut self, host: Arc<dyn ReceiverHost>) -> Result<()>;
+    async fn shutdown(&mut self) -> Result<()>;
+}
+
+#[async_trait]
+pub trait ReceiverHost: Send + Sync {
+    async fn emit(&self, event: Event) -> Result<()>; // awaits when channel full
+}
+
+// Processor: async transform over a Batch. Memory Processor awaits inside process()
+// until memory drops below threshold, then returns the Batch unchanged.
+#[async_trait]
+pub trait Processor: Send + Sync {
+    async fn process(&mut self, batch: Batch) -> Result<Batch>;
+    async fn start(&mut self) -> Result<()>;
+    async fn shutdown(&mut self) -> Result<()>;
+}
+
+// Exporter: receives a Batch by reference (zero-copy); error signals failure to Executor.
+#[async_trait]
+pub trait Exporter: Send + Sync {
+    async fn export(&mut self, batch: &Batch) -> Result<()>;
+    async fn start(&mut self) -> Result<()>;
+    async fn shutdown(&mut self) -> Result<()>;
+}
+```
+
+Note: `Batch` is passed by reference to `Exporter::export` — ownership stays with the Executor
+for retry purposes. The Executor retains the batch until all mandatory exporters succeed or
+max retries are exhausted.
+
+**Are these trait shapes correct?**
+
+> Answer:
+
+---
+
+### Q2: Component Registration — Static or Plugin?
+
+OTel Collector has two distribution models:
+- **Static compilation**: all components are imported at build time; `go build` produces one binary.
+  Contributors write a Go package; users import it and rebuild. Simple, no dynamic loading.
+- **Plugin (`.so`)**: dynamic loading at runtime via `plugin.Open`. No rebuild required to add
+  a component, but Go plugins are fragile (same compiler version, same module dependencies).
+
+OTel chose static compilation (contrib repo + `ocb` builder tool). Given the Apache 2.0 +
+enterprise library model here, static is likely correct — enterprise repo imports OSS + private
+packages and compiles one binary.
+
+**Static compilation or runtime plugin loading for custom components?**
+
+> Answer:
+
+---
+
+## Deferred
+
+- Memory Processor + Executor retry buffer interaction (memory budget accounting)
+- Kafka Receiver in OSS auto-deploy
+- Polyglot component composition: out-of-process Receivers/Exporters in other languages
+  (Rust, Python, etc.) communicating with the Go pipeline core via Arrow Flight (gRPC).
+  Proto types are already defined as the contract; Arrow Flight is the transport when needed.
+
+## Out of Scope
+
+- Exactly-once delivery
+- Fleet-level batch coordination
+- Push-based metadata cache invalidation

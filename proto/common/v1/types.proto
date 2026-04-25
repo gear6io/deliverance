@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package common.v1;
+
+option go_package = "github.com/ingestion/pcommon/common/v1;commonv1";
+
+// Value covers the full internal type system. All pipeline data must map to one of these.
+message Value {
+  oneof kind {
+    string string_value = 1;
+    bytes  bytes_value  = 2;
+    int64  int_value    = 3;
+    double float_value  = 4;
+    bool   bool_value   = 5;
+    Slice  slice_value  = 6;
+    Map    map_value    = 7;
+  }
+}
+
+// Slice is a homogeneous ordered list. Element type is by convention, not enforced here.
+message Slice {
+  repeated Value values = 1;
+}
+
+// Map is a string-keyed dictionary of Values.
+message Map {
+  map<string, Value> values = 1;
+}

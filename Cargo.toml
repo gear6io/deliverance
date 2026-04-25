@@ -1,0 +1,28 @@
+[package]
+name = "ingestion"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "ingestion"
+path = "src/main.rs"
+
+[lib]
+name = "ingestion"
+path = "src/lib.rs"
+
+[dependencies]
+tokio              = { version = "1",    features = ["full"] }
+async-trait        = "0.1"
+arrow              = { version = "53",   features = ["ipc"] }
+prost              = "0.13"
+prost-types        = "0.13"
+serde              = { version = "1",    features = ["derive"] }
+serde_yaml         = "0.9"
+serde_json         = "1"
+axum               = { version = "0.7", features = ["json"] }
+anyhow             = "1"
+thiserror          = "1"
+sysinfo            = "0.32"
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

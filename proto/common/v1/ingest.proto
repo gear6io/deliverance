@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package common.v1;
+
+import "common/v1/types.proto";
+
+option go_package = "github.com/ingestion/pcommon/common/v1;commonv1";
+
+// IngestRequest is what a client sends to the HTTP receiver.
+// Rows are column:value pairs; the receiver normalizes to an Arrow RecordBatch internally.
+message IngestRequest {
+  string       datasource_id = 1;
+  string       ingestion_key = 2;
+  repeated Row rows          = 3;
+}
+
+message Row {
+  map<string, Value> fields = 1;
+}
+
+message IngestResponse {
+  bool   accepted = 1;
+  string message  = 2; // populated on rejection; empty on success
+}
