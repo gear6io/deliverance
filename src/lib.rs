@@ -1,3 +1,4 @@
+pub mod components;
 pub mod config;
 pub mod engine;
 pub mod error;
@@ -19,7 +20,13 @@ pub mod proto {
     }
 }
 
-// Framework surface re-exports — everything a custom component author needs.
+// Component identity and factory surface — everything a component author needs.
+pub use components::{Component, ComponentID, ComponentType, Settings};
+pub use exporter::ExporterFactory;
+pub use processor::ProcessorFactory;
+pub use receiver::ReceiverFactory;
+
+// Framework surface re-exports — everything a pipeline author needs.
 pub use config::Config;
 pub use engine::Engine;
 pub use error::{IngestionError, Result};

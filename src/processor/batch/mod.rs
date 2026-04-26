@@ -3,8 +3,9 @@ pub mod config;
 use async_trait::async_trait;
 use tokio::time::{Duration, Instant};
 
+use crate::components::{Component, Settings};
 use crate::error::Result;
-use crate::processor::Processor;
+use crate::processor::{Processor, ProcessorFactory};
 use crate::types::Batch;
 
 pub use config::Config;
@@ -25,6 +26,12 @@ pub struct BatchingProcessor {
     last_flush: Instant,
 }
 
+impl Component for BatchingProcessor {
+    fn component_type() -> &'static str {
+        "batch"
+    }
+}
+
 impl BatchingProcessor {
     pub fn new(config: Config) -> Self {
         Self {
@@ -32,12 +39,6 @@ impl BatchingProcessor {
             buffer: Batch::new(),
             last_flush: Instant::now(),
         }
-    }
-
-    /// Construct from a raw YAML value — called by the ComponentRegistry factory.
-    pub fn from_config(raw: &serde_yaml::Value) -> anyhow::Result<Box<dyn Processor>> {
-        let cfg: Config = serde_yaml::from_value(raw.clone())?;
-        Ok(Box::new(Self::new(cfg)))
     }
 
     fn should_flush(&self) -> bool {
@@ -78,5 +79,27 @@ impl Processor for BatchingProcessor {
 
     async fn shutdown(&mut self) -> Result<()> {
         Ok(())
+    }
+}
+
+/// Registered once; creates a fresh [`BatchingProcessor`] per config entry.
+pub struct BatchProcessorFactory;
+
+impl ProcessorFactory for BatchProcessorFactory {
+    fn component_type(&self) -> &'static str {
+        BatchingProcessor::component_type()
+    }
+
+    fn create_default_config(&self) -> serde_yaml::Value {
+        serde_yaml::to_value(Config::default()).expect("Config serializes cleanly")
+    }
+
+    fn create(
+        &self,
+        _settings: &Settings,
+        config: &serde_yaml::Value,
+    ) -> anyhow::Result<Box<dyn Processor>> {
+        let cfg: Config = serde_yaml::from_value(config.clone())?;
+        Ok(Box::new(BatchingProcessor::new(cfg)))
     }
 }

@@ -4,8 +4,9 @@ use async_trait::async_trait;
 use sysinfo::System;
 use tokio::time::{sleep, Duration};
 
+use crate::components::{Component, Settings};
 use crate::error::Result;
-use crate::processor::Processor;
+use crate::processor::{Processor, ProcessorFactory};
 use crate::types::Batch;
 
 pub use config::Config;
@@ -25,18 +26,18 @@ pub struct MemoryProcessor {
     system: System,
 }
 
+impl Component for MemoryProcessor {
+    fn component_type() -> &'static str {
+        "memory"
+    }
+}
+
 impl MemoryProcessor {
     pub fn new(config: Config) -> Self {
         Self {
             config,
             system: System::new(),
         }
-    }
-
-    /// Construct from a raw YAML value — called by the ComponentRegistry factory.
-    pub fn from_config(raw: &serde_yaml::Value) -> anyhow::Result<Box<dyn Processor>> {
-        let cfg: Config = serde_yaml::from_value(raw.clone())?;
-        Ok(Box::new(Self::new(cfg)))
     }
 
     fn used_memory_mib(&mut self) -> u64 {
@@ -69,5 +70,27 @@ impl Processor for MemoryProcessor {
 
     async fn shutdown(&mut self) -> Result<()> {
         Ok(())
+    }
+}
+
+/// Registered once; creates a fresh [`MemoryProcessor`] per config entry.
+pub struct MemoryProcessorFactory;
+
+impl ProcessorFactory for MemoryProcessorFactory {
+    fn component_type(&self) -> &'static str {
+        MemoryProcessor::component_type()
+    }
+
+    fn create_default_config(&self) -> serde_yaml::Value {
+        serde_yaml::to_value(Config::default()).expect("Config serializes cleanly")
+    }
+
+    fn create(
+        &self,
+        _settings: &Settings,
+        config: &serde_yaml::Value,
+    ) -> anyhow::Result<Box<dyn Processor>> {
+        let cfg: Config = serde_yaml::from_value(config.clone())?;
+        Ok(Box::new(MemoryProcessor::new(cfg)))
     }
 }

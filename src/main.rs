@@ -17,8 +17,6 @@ async fn main() -> anyhow::Result<()> {
 
     let config = Config::from_file(&config_path)?;
 
-    // Build the registry with built-in processors registered.
-    // Add custom receivers and exporters here before calling build_all().
     let registry = build_registry();
 
     let pipelines = registry.build_all(&config)?;
@@ -41,14 +39,14 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn build_registry() -> ComponentRegistry {
-    use ingestion::processor::{batch::BatchingProcessor, memory::MemoryProcessor};
-    use ingestion::receiver::http::HttpReceiver;
+    use ingestion::processor::batch::BatchProcessorFactory;
+    use ingestion::processor::memory::MemoryProcessorFactory;
+    use ingestion::receiver::http::HttpReceiverFactory;
 
     let mut registry = ComponentRegistry::new();
 
-    registry.register_receiver("http", Box::new(HttpReceiver::from_config));
-    registry.register_processor("memory", Box::new(MemoryProcessor::from_config));
-    registry.register_processor("batch", Box::new(BatchingProcessor::from_config));
-
+    registry.register_receiver(Box::new(HttpReceiverFactory));
+    registry.register_processor(Box::new(MemoryProcessorFactory));
+    registry.register_processor(Box::new(BatchProcessorFactory));
     registry
 }

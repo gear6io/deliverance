@@ -3,6 +3,7 @@ pub mod memory;
 
 use async_trait::async_trait;
 
+use crate::components::Settings;
 use crate::error::Result;
 use crate::types::Batch;
 
@@ -22,4 +23,16 @@ pub trait Processor: Send + Sync {
     async fn process(&mut self, batch: Batch) -> Result<Batch>;
     async fn start(&mut self) -> Result<()>;
     async fn shutdown(&mut self) -> Result<()>;
+}
+
+/// Factory for creating [`Processor`] instances. Register one factory per component type.
+/// Mirrors OTel's `processor.Factory`.
+pub trait ProcessorFactory: Send + Sync {
+    fn component_type(&self) -> &'static str;
+    fn create_default_config(&self) -> serde_yaml::Value;
+    fn create(
+        &self,
+        settings: &Settings,
+        config: &serde_yaml::Value,
+    ) -> anyhow::Result<Box<dyn Processor>>;
 }
