@@ -20,7 +20,8 @@ use arrow::record_batch::RecordBatch;
 use crate::components::{Component, Settings};
 use crate::error::{IngestionError, Result};
 use crate::receiver::{Receiver, ReceiverFactory, ReceiverHost};
-use crate::types::{Event, Source};
+use crate::attrs;
+use crate::types::{Event, Value};
 
 pub use config::HttpReceiverConfig;
 
@@ -142,10 +143,7 @@ async fn handle_ingest(
     };
 
     let event = Event {
-        source: Source {
-            id: payload.datasource_id,
-            attributes: HashMap::new(),
-        },
+        source: HashMap::from([(attrs::datasource::ID.to_string(), Value::String(payload.datasource_id))]),
         record: Arc::new(record_batch),
         received_at: SystemTime::now(),
     };
