@@ -14,7 +14,7 @@ path = "src/lib.rs"
 [dependencies]
 tokio              = { version = "1",    features = ["full"] }
 async-trait        = "0.1"
-arrow              = { version = "53",   features = ["ipc"] }
+arrow              = { version = "53",   features = ["ipc", "prettyprint"] }
 prost              = "0.13"
 prost-types        = "0.13"
 serde              = { version = "1",    features = ["derive"] }
