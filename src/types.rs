@@ -17,13 +17,6 @@ pub enum Value {
     Map(HashMap<String, Value>),
 }
 
-/// Identifies the origin of an event. Mirrors proto Source but owns native Rust data.
-#[derive(Debug, Clone)]
-pub struct Source {
-    pub id: String,
-    pub attributes: HashMap<String, Value>,
-}
-
 /// The unit a Receiver emits into the pipeline.
 ///
 /// `record` is `Arc<RecordBatch>` — cloning is a refcount bump, not a buffer copy.
@@ -31,7 +24,7 @@ pub struct Source {
 /// from Receiver → channel → Processors → Executor → Exporter.
 #[derive(Debug, Clone)]
 pub struct Event {
-    pub source: Source,
+    pub source: HashMap<String, Value>,
     pub record: Arc<RecordBatch>,
     pub received_at: SystemTime,
 }
