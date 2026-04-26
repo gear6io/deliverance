@@ -39,6 +39,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn build_registry() -> ComponentRegistry {
+    use ingestion::exporter::debug::DebugExporterFactory;
     use ingestion::processor::batch::BatchProcessorFactory;
     use ingestion::processor::memory::MemoryProcessorFactory;
     use ingestion::receiver::http::HttpReceiverFactory;
@@ -48,5 +49,6 @@ fn build_registry() -> ComponentRegistry {
     registry.register_receiver(Box::new(HttpReceiverFactory));
     registry.register_processor(Box::new(MemoryProcessorFactory));
     registry.register_processor(Box::new(BatchProcessorFactory));
+    registry.register_exporter(Box::new(DebugExporterFactory));
     registry
 }
