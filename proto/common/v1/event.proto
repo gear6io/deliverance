@@ -2,13 +2,13 @@ syntax = "proto3";
 
 package common.v1;
 
-import "common/v1/source.proto";
+import "common/v1/types.proto";
 import "google/protobuf/timestamp.proto";
 
 option go_package = "github.com/ingestion/pcommon/common/v1;commonv1";
 
 message Event {
-  Source                    source      = 1;
+  map<string, Value>        source      = 1;
   bytes                     data        = 2; // Arrow IPC stream: one RecordBatch (schema + columnar buffers)
   google.protobuf.Timestamp received_at = 3;
 }
